@@ -1,13 +1,13 @@
 {
   "preprocess": {
     "fbcnn": {
-      "enabled": false,
+      "enabled": true,
       "quality": "auto",
       "device": "auto"
     },
     "megapixels": 1.0,
     "resample": "lanczos",
-    "noise": 0.015,
+    "noise": 0.0,
     "noise_seed": 42
   },
   "upscale": {

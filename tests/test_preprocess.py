@@ -37,7 +37,7 @@ def test_load_config_flattens_sections(tmp_path):
                 "preprocess": {"megapixels": 1.2, "noise": 0.03},
                 "upscale": {"scale": 3},
                 "tiling": {"tile": 768},
-                "backend": {"attention-mode": "sageattn_2", "vae-tiled": True},
+                "backend": {"model": "3b", "model-download": False, "attention-mode": "sageattn_2", "vae-tiled": True},
             }
         ),
         encoding="utf-8",
@@ -47,6 +47,8 @@ def test_load_config_flattens_sections(tmp_path):
     assert defaults["tile"] == 768
     assert defaults["pre_megapixels"] == 1.2
     assert defaults["noise"] == 0.03
+    assert defaults["dit_model"] == "3b"
+    assert defaults["model_download"] is False
     assert defaults["attention_mode"] == "sageattn_2"
     assert defaults["vae_tiled"] is True
     assert defaults["format"] == "webp"

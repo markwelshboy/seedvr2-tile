@@ -10,8 +10,12 @@ from pathlib import Path
 from PIL import Image, ImageOps
 
 from . import __version__
-from .backend import BackendOptions, DEFAULT_CACHE_ROOT, resolve_seedvr2_root, run_group, setup_upstream
+from .backend import (
+    BackendOptions, DEFAULT_CACHE_ROOT, DEFAULT_MODEL_ALIAS, ensure_models, model_alias_lines,
+    resolve_model_name, resolve_seedvr2_root, run_group, setup_upstream,
+)
 from .config import load_config
+from .fbcnn import DEFAULT_FBCNN_ROOT, FBCNNOptions, normalize_quality, release_fbcnn, setup_fbcnn
 from .preprocess import PreprocessOptions, preprocess_image
 from .stitching import Stitcher
 from .tiling import TileSpec, make_tiles, save_tiles
@@ -96,6 +100,11 @@ def _build_parser(defaults: dict | None = None) -> argparse.ArgumentParser:
     setup.add_argument("--root", type=Path, default=DEFAULT_CACHE_ROOT)
     setup.add_argument("--ref", default="main", help="upstream branch/tag/commit (default: main)")
     setup.add_argument("--install-deps", action="store_true", help="pip install -e the upstream checkout into this Python environment")
+    setup.add_argument("--fbcnn", action=argparse.BooleanOptionalAction, default=False, help="also clone/update the official FBCNN JPEG artifact-removal backend")
+    setup.add_argument("--fbcnn-root", type=Path, default=DEFAULT_FBCNN_ROOT)
+    setup.add_argument("--fbcnn-ref", default="main", help="FBCNN branch/tag/commit (default: main)")
+
+    sub.add_parser("models", help="list friendly SeedVR2 model aliases")
 
     run = sub.add_parser("run", help="tile, upscale, and stitch images")
     run.add_argument("input", type=Path, nargs="?", help="input image or directory (may also come from config)")
@@ -120,7 +129,11 @@ def _build_parser(defaults: dict | None = None) -> argparse.ArgumentParser:
     run.add_argument("--work-dir", type=Path)
     run.add_argument("--dry-run", action=argparse.BooleanOptionalAction, default=False, help="prepare tiles and print backend commands without running SeedVR2")
 
-    preprocess = run.add_argument_group("Optional preprocessing")
+    preprocess = run.add_argument_group("Optional preprocessing (order: FBCNN -> resize -> noise)")
+    preprocess.add_argument("--fbcnn", dest="fbcnn_enabled", action=argparse.BooleanOptionalAction, default=False, help="remove JPEG artifacts with official FBCNN before other preprocessing")
+    preprocess.add_argument("--jpeg-quality", dest="fbcnn_quality", default="auto", help="FBCNN JPEG QF: auto or explicit quality factor 1..100")
+    preprocess.add_argument("--fbcnn-root", type=Path, help="official FBCNN checkout; defaults to FBCNN_ROOT or ~/.cache/seedvr2-tile/FBCNN")
+    preprocess.add_argument("--fbcnn-device", default="auto", help="FBCNN device: auto, cpu, cuda, cuda:0, etc. (default: auto)")
     preprocess.add_argument("--pre-megapixels", type=float, dest="pre_megapixels", help="resize source RGB/alpha to this target megapixel count before tiling and upscaling (ComfyUI-style MP = 1024x1024 pixels)")
     preprocess.add_argument("--pre-resample", choices=["nearest-exact", "bilinear", "area", "bicubic", "lanczos"], default="lanczos", help="resample filter used by --pre-megapixels (default: lanczos)")
     preprocess.add_argument("--noise", type=float, default=0.0, help="additive Gaussian noise strength in [0, 1] applied after optional pre-resize")
@@ -129,8 +142,11 @@ def _build_parser(defaults: dict | None = None) -> argparse.ArgumentParser:
     backend = run.add_argument_group("SeedVR2 backend")
     backend.add_argument("--seedvr2-root")
     backend.add_argument("--seed", type=int, default=42)
-    backend.add_argument("--dit-model")
+    model_select = backend.add_mutually_exclusive_group()
+    model_select.add_argument("--model", dest="dit_model", default=DEFAULT_MODEL_ALIAS, help="friendly model alias (3b, 7b, 7b-sharp, etc.) or exact filename; default: 3b")
+    model_select.add_argument("--dit-model", dest="dit_model", help="exact SeedVR2 DiT filename (expert/backward-compatible form)")
     backend.add_argument("--model-dir")
+    backend.add_argument("--model-download", action=argparse.BooleanOptionalAction, default=True, help="preflight/download selected DiT + VAE using Numz downloader (default: enabled)")
     backend.add_argument("--cuda-device")
     backend.add_argument("--attention-mode", choices=["sdpa", "flash_attn_2", "flash_attn_3", "sageattn_2", "sageattn_3"], default="sdpa")
     backend.add_argument("--color-correction", choices=["lab", "wavelet", "wavelet_adaptive", "hsv", "adain", "none"], default="lab")
@@ -160,6 +176,8 @@ def _run(args: argparse.Namespace) -> int:
         raise ValueError("--pre-megapixels must be > 0")
     if args.noise < 0 or args.noise > 1:
         raise ValueError("--noise must be in the range [0, 1]")
+    args.fbcnn_quality = normalize_quality(args.fbcnn_quality)
+    args.dit_model = resolve_model_name(args.dit_model)
 
     tile_w = args.tile_width or args.tile
     tile_h = args.tile_height or args.tile
@@ -175,6 +193,7 @@ def _run(args: argparse.Namespace) -> int:
         seed=args.seed,
         dit_model=args.dit_model,
         model_dir=args.model_dir,
+        download_model=args.model_download,
         cuda_device=args.cuda_device,
         attention_mode=args.attention_mode,
         color_correction=args.color_correction,
@@ -189,7 +208,17 @@ def _run(args: argparse.Namespace) -> int:
         debug=args.debug,
     )
 
+    # Resolve/validate/download the selected DiT + VAE before any expensive
+    # preprocessing or tile preparation. Numz owns the actual download logic.
+    ensure_models(options, dry_run=args.dry_run)
+
     preprocess_options = PreprocessOptions(
+        fbcnn=FBCNNOptions(
+            enabled=args.fbcnn_enabled,
+            quality=args.fbcnn_quality,
+            root=args.fbcnn_root,
+            device=args.fbcnn_device,
+        ),
         megapixels=args.pre_megapixels,
         resample=args.pre_resample,
         noise=args.noise,
@@ -288,6 +317,10 @@ def _run(args: argparse.Namespace) -> int:
             print("Nothing to do.")
             return 0
 
+        # FBCNN may have used CUDA during preprocessing. Release it before the
+        # much larger SeedVR2 backend is launched so it does not reserve VRAM.
+        release_fbcnn()
+
         # One upstream directory invocation per distinct tile inference resolution.
         # With the common --scale workflow this is normally exactly one invocation,
         # so Numz's --cache_dit/--cache_vae persist across every tile in the batch.
@@ -338,7 +371,7 @@ def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
 
     # Convenience: allow `seedvr2-tile INPUT OUTPUT ...` in addition to `run`.
-    if argv and argv[0] not in {"run", "setup", "-h", "--help", "--version"}:
+    if argv and argv[0] not in {"run", "setup", "models", "-h", "--help", "--version"}:
         argv.insert(0, "run")
 
     defaults: dict | None = None
@@ -351,9 +384,18 @@ def main(argv: list[str] | None = None) -> int:
 
     parser = _build_parser(defaults=defaults)
     args = parser.parse_args(argv)
+    if args.command == "models":
+        print("SeedVR2 model aliases (default: 3b):")
+        for line in model_alias_lines():
+            print("  " + line)
+        print("\nExact Numz registry/discovered filenames are also accepted with --model or --dit-model.")
+        return 0
     if args.command == "setup":
         setup_upstream(args.root, args.ref, args.install_deps)
         print(f"SeedVR2 backend ready: {args.root.expanduser().resolve()}")
+        if args.fbcnn:
+            setup_fbcnn(args.fbcnn_root, args.fbcnn_ref)
+            print(f"FBCNN backend ready: {args.fbcnn_root.expanduser().resolve()}")
         return 0
     if args.command == "run":
         return _run(args)

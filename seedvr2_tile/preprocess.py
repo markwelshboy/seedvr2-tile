@@ -6,9 +6,12 @@ import math
 import numpy as np
 from PIL import Image
 
+from .fbcnn import FBCNNOptions, restore_jpeg_artifacts
+
 
 @dataclass(frozen=True)
 class PreprocessOptions:
+    fbcnn: FBCNNOptions = FBCNNOptions()
     megapixels: float | None = None
     resample: str = "lanczos"
     noise: float = 0.0
@@ -53,10 +56,15 @@ def preprocess_image(
     image_index: int = 0,
     base_seed: int = 0,
 ) -> tuple[Image.Image, Image.Image | None, list[str]]:
-    """Resize first, then add noise to RGB only. Alpha follows resize but never receives noise."""
+    """FBCNN first, optional resize second, then noise. Alpha is never restored/noised."""
     rgb = image.copy()
     a = alpha.copy() if alpha is not None else None
     messages: list[str] = []
+
+    if options.fbcnn.enabled:
+        rgb, predicted_qf = restore_jpeg_artifacts(rgb, options.fbcnn)
+        mode = "auto" if options.fbcnn.quality == "auto" else f"QF={options.fbcnn.quality}"
+        messages.append(f"FBCNN={mode} predicted={predicted_qf:.0f}")
 
     if options.megapixels is not None:
         target_w, target_h = target_size_for_megapixels(rgb.width, rgb.height, options.megapixels)

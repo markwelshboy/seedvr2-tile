@@ -2,28 +2,26 @@
 
 Standalone spatially tiled batch upscaling for [SeedVR2](https://github.com/numz/ComfyUI-SeedVR2_VideoUpscaler) — **no ComfyUI server, workflow, browser, or API queue required**.
 
-`seedvr2-tile` deliberately does not fork SeedVR2 inference. It prepares overlapping spatial tiles, runs Numz's native `inference_cli.py` in directory mode with model caching enabled, then stitches the processed tiles back into the final image.
+`seedvr2-tile` deliberately does not fork SeedVR2 inference. It handles optional image cleanup/degradation, creates overlapping spatial tiles, runs Numz's native `inference_cli.py` with model caching enabled, and stitches the processed tiles back together.
 
-## Why
-
-SeedVR2's native VAE tiling reduces VAE memory use, but the DiT still processes the complete latent. Spatial tiling is different: each region of a large image is sent through SeedVR2 independently, allowing large final images while bounding per-inference VRAM use.
-
-This frontend also supports an optional **preprocess stage before tiling**:
+## Pipeline
 
 ```text
 source
-  -> optional resize-to-megapixels
-  -> optional Gaussian image noise
-  -> spatial tiles
+  -> optional FBCNN JPEG artifact removal
+  -> optional resize to target megapixels
+  -> optional additive Gaussian noise
+  -> spatial tiling
   -> SeedVR2
   -> stitch
+  -> output
 ```
 
-That makes it possible to keep the source size and merely add variance, downscale before rebuilding detail, or combine both approaches.
+This lets the tool operate anywhere between faithful upscale and deliberately more perceptual reconstruction. For noisy or compressed photographs, intentionally removing bad high-frequency information before SeedVR2 can produce a more natural result than simply enlarging every source artifact.
 
 ## Status
 
-Early standalone MVP. The orchestration, tiling, preprocessing, config, and stitching paths are structurally tested. Real-GPU validation against SeedVR2 model variants is still needed.
+Early standalone implementation. Geometry, preprocessing, config loading, and orchestration have unit coverage; real-GPU validation across SeedVR2/FBCNN combinations is still ongoing.
 
 ## Install
 
@@ -32,19 +30,32 @@ python -m venv .venv
 source .venv/bin/activate
 pip install -e .
 
-# Clone/update Numz SeedVR2 into ~/.cache/seedvr2-tile/... and install its deps
+# Clone/update Numz SeedVR2 and install its dependencies.
 seedvr2-tile setup --install-deps
 ```
 
-If you already have the standalone Numz repository elsewhere:
+If you want FBCNN JPEG cleanup too:
+
+```bash
+seedvr2-tile setup --install-deps --fbcnn
+```
+
+That checks out the official FBCNN repository under:
+
+```text
+~/.cache/seedvr2-tile/FBCNN
+```
+
+The official `fbcnn_color.pth` weight is downloaded from the FBCNN GitHub release on first use.
+
+Existing checkouts can instead be supplied through:
 
 ```bash
 export SEEDVR2_ROOT=/path/to/ComfyUI-SeedVR2_VideoUpscaler
+export FBCNN_ROOT=/path/to/FBCNN
 ```
 
-or pass `--seedvr2-root`.
-
-## Basic batch use
+## Basic use
 
 ```bash
 seedvr2-tile input/ output/ --scale 2
@@ -56,7 +67,7 @@ Equivalent explicit form:
 seedvr2-tile run input/ output/ --scale 2
 ```
 
-Recommended starting point:
+Recommended tiled starting point:
 
 ```bash
 seedvr2-tile input/ output/ \
@@ -68,19 +79,122 @@ seedvr2-tile input/ output/ \
   --blend multiband
 ```
 
-The SeedVR2 tile result is resized to the exact requested final geometric scale before stitching, so `--tile-upscale-resolution` acts as an inference-resolution ceiling rather than changing final dimensions.
+## Model selection and automatic download
 
-## Preprocessing: resize and/or add detail variance
+The default model is **3B FP8**, because the smaller model is often preferable for natural image restoration as well as being lighter to run. Select models with friendly aliases:
 
-Preprocessing happens **before spatial tiling** and before final output dimensions are computed.
+```bash
+seedvr2-tile input/ output/ --model 3b
+seedvr2-tile input/ output/ --model 7b
+seedvr2-tile input/ output/ --model 7b-sharp
+```
 
-The implementation follows the relevant ComfyUI semantics:
+List the built-in aliases:
 
-- target megapixels use `megapixels * 1024 * 1024` total pixels while preserving aspect ratio
-- noise is additive Gaussian noise: `clip(image + strength * N(0,1), 0, 1)`
-- alpha follows the resize geometry but is never noise-corrupted
+```bash
+seedvr2-tile models
+```
 
-### Noise only, keep source dimensions
+Current aliases include:
+
+```text
+3b               3B FP8 (default)
+3b-fp16          3B FP16
+3b-q8            3B GGUF Q8_0
+3b-q4            3B GGUF Q4_K_M
+7b               7B mixed FP8
+7b-fp16          7B FP16
+7b-q4            7B GGUF Q4_K_M
+7b-sharp         7B sharp mixed FP8
+7b-sharp-fp16    7B sharp FP16
+7b-sharp-q4      7B sharp GGUF Q4_K_M
+```
+
+An exact Numz filename is also accepted through `--model` or the backward-compatible `--dit-model` option.
+
+Before preprocessing begins, `seedvr2-tile` runs a model preflight. It delegates to **Numz's own downloader**, which checks all registered model paths, downloads a missing DiT and shared VAE from Hugging Face, supports resumable downloads, validates hashes, and replaces corrupt cached files.
+
+```bash
+seedvr2-tile input/ output/ --model 3b
+# -> model/VAE checked or downloaded first
+# -> then FBCNN/resize/noise
+# -> then tiling + SeedVR2
+```
+
+Choose a specific model directory if desired:
+
+```bash
+seedvr2-tile input/ output/ \
+  --model 3b \
+  --model-dir /models/seedvr2
+```
+
+For an intentionally offline run, disable the preflight download:
+
+```bash
+seedvr2-tile input/ output/ --model 3b --no-model-download
+```
+
+With download disabled, the selected model must already be discoverable by Numz when inference starts.
+
+## Preprocessing
+
+Preprocessing is optional and always runs in this order:
+
+```text
+FBCNN -> resize -> noise
+```
+
+### FBCNN JPEG artifact removal
+
+Blind/automatic quality-factor estimation:
+
+```bash
+seedvr2-tile input/ output/ \
+  --fbcnn \
+  --jpeg-quality auto \
+  --scale 2
+```
+
+Known JPEG quality factor:
+
+```bash
+seedvr2-tile input/ output/ \
+  --fbcnn \
+  --jpeg-quality 95 \
+  --scale 2
+```
+
+`--jpeg-quality` is an actual JPEG quality factor from `1..100`, matching the official FBCNN flexible-control interface. Lower values tell FBCNN to perform stronger artifact restoration. `auto` uses the model's blind predicted quality factor.
+
+FBCNN runs **before resizing** so it sees JPEG blocking/ringing on the original pixel grid. The model is released from memory before SeedVR2 starts so a CUDA FBCNN pass does not continue occupying VRAM during upscale inference.
+
+Choose the FBCNN device independently if desired:
+
+```bash
+--fbcnn-device auto
+--fbcnn-device cpu
+--fbcnn-device cuda:0
+```
+
+FBCNN is pixel-based, so it can also clean a PNG/WebP that was originally sourced from JPEG; it does not require access to JPEG quantization tables.
+
+### Resize to target megapixels
+
+```bash
+seedvr2-tile input/ output/ \
+  --pre-megapixels 1.0 \
+  --pre-resample lanczos \
+  --scale 2
+```
+
+Megapixel sizing follows ComfyUI `Scale Image to Total Pixels` semantics: `1 MP = 1024 * 1024` total pixels, with aspect ratio preserved.
+
+This is intentionally useful as a degradation stage. A grainy source can be downsampled to discard sensor/compression noise and then handed to SeedVR2 to reconstruct more coherent high-frequency detail.
+
+### Add image noise
+
+Noise only, keeping source dimensions:
 
 ```bash
 seedvr2-tile input/ output/ \
@@ -88,39 +202,39 @@ seedvr2-tile input/ output/ \
   --scale 2
 ```
 
-### Resize before the tiled upscale
+Resize then add noise:
 
 ```bash
 seedvr2-tile input/ output/ \
   --pre-megapixels 1.0 \
-  --pre-resample lanczos \
-  --scale 2
-```
-
-### Resize and add noise
-
-```bash
-seedvr2-tile input/ output/ \
-  --pre-megapixels 1.0 \
-  --pre-resample lanczos \
   --noise 0.015 \
   --noise-seed 42 \
   --scale 2
 ```
 
-Useful starting noise strengths from the advanced tiled workflow are approximately:
+Noise matches the ComfyUI operation conceptually: `clip(image + strength * N(0,1), 0, 1)`. Useful experimental strengths include `0.005`, `0.01`, `0.015`, `0.03`, and `0.04`.
 
-- `0.005` — almost nothing
-- `0.01` — ultra-light
-- `0.015` — light
-- `0.03` — medium
-- `0.04` — high
+### Low-light / compressed-photo example
 
-The final `--scale`, `--long-edge`, or `--short-edge` applies to the **preprocessed** dimensions. For example, taking a source down to ~1 MP and then using `--scale 2` yields roughly 4 MP output.
+For a grainy JPEG where pure enlargement makes the artifacts worse:
 
-When preprocessing is active, `--keep-work` retains the exact preprocessed images under `preprocessed/` so the source, degraded/noised source, SeedVR2 tiles, and final result can be compared directly.
+```bash
+seedvr2-tile input/ output/ \
+  --fbcnn \
+  --jpeg-quality auto \
+  --pre-megapixels 1.0 \
+  --noise 0 \
+  --scale 2 \
+  --tile 1024 \
+  --overlap 64 \
+  --blend multiband
+```
 
-## Target-size modes
+If FBCNN reports or visually behaves too aggressively, compare `auto` against the known source QF. Noise can then be introduced separately if additional synthesized detail is useful.
+
+## Output size modes
+
+The final output size is computed **after preprocessing**.
 
 `--scale`, `--long-edge`, and `--short-edge` are mutually exclusive:
 
@@ -130,80 +244,35 @@ seedvr2-tile input.png output/ --long-edge 4096
 seedvr2-tile input.png output/ --short-edge 2048
 ```
 
-If none is supplied, the default is `--scale 2`.
+For example, a 4 MP source preprocessed to 1 MP and then run with `--scale 2` produces roughly a 4 MP output.
 
-## JSON configuration
+## Spatial tiling
 
-For repeatable batch recipes, most run options can live in a JSON config file. The recommended sectional format is:
+Spatial tiling is distinct from SeedVR2's VAE tiling. Each image region is independently sent through SeedVR2, bounding the DiT inference footprint as well as the VAE footprint.
 
-```json
-{
-  "preprocess": {
-    "megapixels": 1.0,
-    "resample": "lanczos",
-    "noise": 0.015,
-    "noise_seed": 42
-  },
-  "upscale": {
-    "scale": 2.0
-  },
-  "tiling": {
-    "tile": 1024,
-    "overlap": 64,
-    "tile_upscale_resolution": 2048,
-    "strategy": "chess",
-    "blend": "multiband"
-  },
-  "backend": {
-    "attention_mode": "sageattn_2",
-    "color_correction": "lab",
-    "blocks_to_swap": 0,
-    "vae_tiled": false
-  },
-  "io": {
-    "format": "png",
-    "recursive": false,
-    "overwrite": false
-  }
-}
-```
-
-An example lives at `examples/detail.json`.
-
-Run with positional paths:
-
-```bash
-seedvr2-tile input/ output/ --config examples/detail.json
-```
-
-You can alternatively put `input` and `output` under `io` and run:
-
-```bash
-seedvr2-tile --config my-job.json
-```
-
-**Explicit CLI options override config values**, so saved recipes remain easy to tweak:
-
-```bash
-seedvr2-tile input/ output/ \
-  --config examples/detail.json \
-  --noise 0.03 \
-  --scale 3
-```
-
-Boolean values have matching `--no-*` forms, so a configured option can be disabled for one invocation, for example:
-
-```bash
-seedvr2-tile input/ output/ --config settings.json --no-vae-tiled
-```
-
-## SeedVR2 passthroughs
-
-Useful backend options include:
+Useful controls:
 
 ```text
---dit-model MODEL
+--tile 1024
+--tile-width 1024
+--tile-height 1024
+--overlap 64
+--tile-upscale-resolution 2048
+--strategy chess|linear
+--blend multiband|content-aware|bilateral|linear|simple
+```
+
+Tiles use real neighboring source pixels as context. Reflection padding is only introduced outside usable source pixels / partial edge tiles and is discarded before stitching.
+
+## SeedVR2 options
+
+Useful passthroughs include:
+
+```text
+--model 3b|7b|7b-sharp|...
+--dit-model EXACT_FILENAME
 --model-dir PATH
+--model-download / --no-model-download
 --cuda-device 0
 --attention-mode sdpa|flash_attn_2|flash_attn_3|sageattn_2|sageattn_3
 --blocks-to-swap N
@@ -217,64 +286,101 @@ Useful backend options include:
 --color-correction lab|wavelet|wavelet_adaptive|hsv|adain|none
 ```
 
-Example lower-VRAM run:
+With the normal `--scale` workflow, same-sized tile groups are submitted to Numz's CLI as a directory with `--cache_dit --cache_vae`, keeping the heavy models hot across the batch.
+
+## JSON configuration
+
+For repeatable recipes, use sectional JSON. Explicit CLI arguments override config values.
+
+```json
+{
+  "preprocess": {
+    "fbcnn": {
+      "enabled": true,
+      "quality": "auto",
+      "device": "auto"
+    },
+    "megapixels": 1.0,
+    "resample": "lanczos",
+    "noise": 0.0,
+    "noise_seed": 42
+  },
+  "upscale": {
+    "scale": 2.0
+  },
+  "tiling": {
+    "tile": 1024,
+    "overlap": 64,
+    "tile_upscale_resolution": 2048,
+    "strategy": "chess",
+    "blend": "multiband"
+  },
+  "backend": {
+    "model": "3b",
+    "model_download": true,
+    "attention_mode": "sdpa",
+    "color_correction": "lab",
+    "vae_tiled": false
+  },
+  "io": {
+    "format": "png",
+    "recursive": false,
+    "overwrite": false
+  }
+}
+```
+
+Run a recipe:
+
+```bash
+seedvr2-tile input/ output/ --config examples/lowlight-jpeg-naturalize.json
+```
+
+Override one setting without editing it:
 
 ```bash
 seedvr2-tile input/ output/ \
-  --scale 2 \
-  --tile 768 \
-  --overlap 64 \
-  --blocks-to-swap 24 \
-  --swap-io-components \
-  --dit-offload-device cpu \
-  --vae-offload-device cpu \
-  --vae-tiled
+  --config examples/lowlight-jpeg-naturalize.json \
+  --jpeg-quality 95
 ```
 
-## Batch/cache behavior
+Boolean options have inverse CLI switches, so config values can be temporarily disabled:
 
-Tiles are grouped by the SeedVR2 processing resolution they require. Each group is sent to Numz's CLI as a directory with:
-
-```text
---batch_size 1
---cache_dit
---cache_vae
+```bash
+seedvr2-tile input/ output/ --config recipe.json --no-fbcnn
+seedvr2-tile input/ output/ --config recipe.json --no-vae-tiled
 ```
 
-This keeps unrelated spatial tiles from being treated as temporal video frames while keeping models hot across the batch.
+## Debugging and tuning
 
-## Stitching
-
-Available methods:
-
-- `multiband` — Laplacian-pyramid blending (default)
-- `content-aware` — multiband with local sharpness preference in overlap regions
-- `bilateral` — multiband plus edge-preserving seam smoothing
-- `linear` — cosine-feathered weighted accumulation
-- `simple` — direct averaging in overlap regions
-
-Tiles use real neighboring source pixels as context. Reflection padding is only introduced outside the source image or to fill a partial final tile to the fixed processing footprint; synthetic regions are discarded before stitching.
-
-## Debugging
-
-Prepare tiles and print the exact Numz command without running inference:
+Prepare tiles and print SeedVR2 commands without running inference:
 
 ```bash
 seedvr2-tile input/ output/ --dry-run --keep-work
 ```
 
-Keep intermediate input/output tiles:
+Keep intermediate files:
 
 ```bash
 seedvr2-tile input/ output/ --keep-work
 ```
 
-or use an explicit work directory:
+When preprocessing is active, the work tree contains the exact image that enters spatial tiling:
 
-```bash
-seedvr2-tile input/ output/ --work-dir ./work
+```text
+work/
+├── preprocessed/
+│   └── image.png
+├── r2048/
+│   ├── input/      # SeedVR2 input tiles
+│   └── output/     # SeedVR2 output tiles
+└── ...
 ```
+
+That makes it practical to compare source → cleanup/degradation → SeedVR2 tiles → final result rather than tuning blind.
 
 ## Relationship to the ComfyUI tiling node
 
 The spatial tiling approach is inspired by Moonwhaler's [`comfyui-seedvr2-tilingupscaler`](https://github.com/moonwhaler/comfyui-seedvr2-tilingupscaler), but this project is a standalone implementation and does not import ComfyUI or the Moonwhaler node.
+
+FBCNN remains an external official backend from [`jiaxi-jiang/FBCNN`](https://github.com/jiaxi-jiang/FBCNN); its code is not vendored here.
