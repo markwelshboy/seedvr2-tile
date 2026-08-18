@@ -1,0 +1,28 @@
+{
+  "preprocess": {
+    "megapixels": 1.0,
+    "resample": "lanczos",
+    "noise": 0.015,
+    "noise_seed": 42
+  },
+  "upscale": {
+    "scale": 2.0
+  },
+  "tiling": {
+    "tile": 1024,
+    "overlap": 64,
+    "tile_upscale_resolution": 2048,
+    "strategy": "chess",
+    "blend": "multiband"
+  },
+  "backend": {
+    "attention_mode": "sdpa",
+    "color_correction": "lab",
+    "vae_tiled": false
+  },
+  "io": {
+    "format": "png",
+    "recursive": false,
+    "overwrite": false
+  }
+}
