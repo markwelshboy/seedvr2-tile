@@ -11,6 +11,8 @@ from PIL import Image, ImageOps
 
 from . import __version__
 from .backend import BackendOptions, DEFAULT_CACHE_ROOT, resolve_seedvr2_root, run_group, setup_upstream
+from .config import load_config
+from .preprocess import PreprocessOptions, preprocess_image
 from .stitching import Stitcher
 from .tiling import TileSpec, make_tiles, save_tiles
 
@@ -73,7 +75,16 @@ def _save_output(image: Image.Image, path: Path, fmt: str, quality: int) -> None
         image.save(path, format="WEBP", quality=quality, method=6)
 
 
-def _build_parser() -> argparse.ArgumentParser:
+def _extract_config_path(argv: list[str]) -> Path | None:
+    for idx, arg in enumerate(argv):
+        if arg == "--config" and idx + 1 < len(argv):
+            return Path(argv[idx + 1])
+        if arg.startswith("--config="):
+            return Path(arg.split("=", 1)[1])
+    return None
+
+
+def _build_parser(defaults: dict | None = None) -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="seedvr2-tile",
         description="Standalone spatially tiled batch frontend for SeedVR2",
@@ -87,12 +98,13 @@ def _build_parser() -> argparse.ArgumentParser:
     setup.add_argument("--install-deps", action="store_true", help="pip install -e the upstream checkout into this Python environment")
 
     run = sub.add_parser("run", help="tile, upscale, and stitch images")
-    run.add_argument("input", type=Path)
-    run.add_argument("output", type=Path)
+    run.add_argument("input", type=Path, nargs="?", help="input image or directory (may also come from config)")
+    run.add_argument("output", type=Path, nargs="?", help="output directory (may also come from config)")
+    run.add_argument("--config", type=Path, help="optional JSON config file; CLI flags override values from the file")
     size = run.add_mutually_exclusive_group()
-    size.add_argument("--scale", type=float, default=2.0, help="output scale factor (default: 2.0)")
-    size.add_argument("--long-edge", type=int, help="target output longest edge")
-    size.add_argument("--short-edge", type=int, help="target output shortest edge")
+    size.add_argument("--scale", type=float, default=None, help="output scale factor applied after preprocessing (default: 2.0 when no size mode is set)")
+    size.add_argument("--long-edge", type=int, help="target output longest edge after preprocessing")
+    size.add_argument("--short-edge", type=int, help="target output shortest edge after preprocessing")
     run.add_argument("--tile", type=int, default=1024, help="square core tile size (default: 1024)")
     run.add_argument("--tile-width", type=int)
     run.add_argument("--tile-height", type=int)
@@ -102,11 +114,17 @@ def _build_parser() -> argparse.ArgumentParser:
     run.add_argument("--blend", choices=["multiband", "linear", "simple", "content-aware", "bilateral"], default="multiband")
     run.add_argument("--format", choices=["png", "jpg", "webp"], default="png")
     run.add_argument("--quality", type=int, default=95)
-    run.add_argument("--recursive", action="store_true")
-    run.add_argument("--overwrite", action="store_true")
-    run.add_argument("--keep-work", action="store_true")
+    run.add_argument("--recursive", action=argparse.BooleanOptionalAction, default=False)
+    run.add_argument("--overwrite", action=argparse.BooleanOptionalAction, default=False)
+    run.add_argument("--keep-work", action=argparse.BooleanOptionalAction, default=False)
     run.add_argument("--work-dir", type=Path)
-    run.add_argument("--dry-run", action="store_true", help="prepare tiles and print backend commands without running SeedVR2")
+    run.add_argument("--dry-run", action=argparse.BooleanOptionalAction, default=False, help="prepare tiles and print backend commands without running SeedVR2")
+
+    preprocess = run.add_argument_group("Optional preprocessing")
+    preprocess.add_argument("--pre-megapixels", type=float, dest="pre_megapixels", help="resize source RGB/alpha to this target megapixel count before tiling and upscaling (ComfyUI-style MP = 1024x1024 pixels)")
+    preprocess.add_argument("--pre-resample", choices=["nearest-exact", "bilinear", "area", "bicubic", "lanczos"], default="lanczos", help="resample filter used by --pre-megapixels (default: lanczos)")
+    preprocess.add_argument("--noise", type=float, default=0.0, help="additive Gaussian noise strength in [0, 1] applied after optional pre-resize")
+    preprocess.add_argument("--noise-seed", type=int, help="base RNG seed for preprocessing noise; defaults to the main --seed plus image index")
 
     backend = run.add_argument_group("SeedVR2 backend")
     backend.add_argument("--seedvr2-root")
@@ -117,21 +135,32 @@ def _build_parser() -> argparse.ArgumentParser:
     backend.add_argument("--attention-mode", choices=["sdpa", "flash_attn_2", "flash_attn_3", "sageattn_2", "sageattn_3"], default="sdpa")
     backend.add_argument("--color-correction", choices=["lab", "wavelet", "wavelet_adaptive", "hsv", "adain", "none"], default="lab")
     backend.add_argument("--blocks-to-swap", type=int, default=0)
-    backend.add_argument("--swap-io-components", action="store_true")
+    backend.add_argument("--swap-io-components", action=argparse.BooleanOptionalAction, default=False)
     backend.add_argument("--dit-offload-device", default="none")
     backend.add_argument("--vae-offload-device", default="none")
     backend.add_argument("--tensor-offload-device", default="cpu")
-    backend.add_argument("--vae-tiled", action="store_true")
+    backend.add_argument("--vae-tiled", action=argparse.BooleanOptionalAction, default=False)
     backend.add_argument("--vae-tile-size", type=int, default=1024)
     backend.add_argument("--vae-tile-overlap", type=int, default=128)
-    backend.add_argument("--debug", action="store_true")
+    backend.add_argument("--debug", action=argparse.BooleanOptionalAction, default=False)
 
+    if defaults:
+        run.set_defaults(**defaults)
     return parser
 
 
 def _run(args: argparse.Namespace) -> int:
+    if args.input is None or args.output is None:
+        raise ValueError("input and output are required (positionally or via --config)")
+    if args.scale is None and args.long_edge is None and args.short_edge is None:
+        args.scale = 2.0
     if args.scale is not None and args.scale <= 0:
         raise ValueError("--scale must be > 0")
+    if args.pre_megapixels is not None and args.pre_megapixels <= 0:
+        raise ValueError("--pre-megapixels must be > 0")
+    if args.noise < 0 or args.noise > 1:
+        raise ValueError("--noise must be in the range [0, 1]")
+
     tile_w = args.tile_width or args.tile
     tile_h = args.tile_height or args.tile
     if args.overlap >= min(tile_w, tile_h):
@@ -160,6 +189,13 @@ def _run(args: argparse.Namespace) -> int:
         debug=args.debug,
     )
 
+    preprocess_options = PreprocessOptions(
+        megapixels=args.pre_megapixels,
+        resample=args.pre_resample,
+        noise=args.noise,
+        noise_seed=args.noise_seed,
+    )
+
     if args.work_dir:
         work_root = args.work_dir.expanduser().resolve()
         work_root.mkdir(parents=True, exist_ok=True)
@@ -186,6 +222,14 @@ def _run(args: argparse.Namespace) -> int:
                 opened = ImageOps.exif_transpose(opened)
                 alpha = opened.getchannel("A").copy() if "A" in opened.getbands() else None
                 rgb = opened.convert("RGB")
+                original_width, original_height = rgb.size
+                rgb, alpha, preprocess_messages = preprocess_image(
+                    rgb,
+                    alpha,
+                    preprocess_options,
+                    image_index=image_index,
+                    base_seed=args.seed,
+                )
                 width, height = rgb.size
                 scale = _compute_scale(width, height, args)
                 if scale <= 0:
@@ -201,6 +245,13 @@ def _run(args: argparse.Namespace) -> int:
                     padding=args.overlap,
                     strategy=args.strategy,
                 )
+                if preprocess_messages:
+                    preview = rgb.copy()
+                    if alpha is not None:
+                        preview.putalpha(alpha)
+                    pre_path = work_root / "preprocessed" / relative.with_suffix(".png")
+                    pre_path.parent.mkdir(parents=True, exist_ok=True)
+                    preview.save(pre_path, format="PNG")
 
             process_w, process_h = tile_pairs[0][0].process_size
             desired_resolution = _round_even(min(process_w, process_h) * scale)
@@ -222,8 +273,14 @@ def _run(args: argparse.Namespace) -> int:
                     group_resolution=group_resolution,
                 )
             )
+
+            preamble = f"src={original_width}x{original_height}"
+            if (width, height) != (original_width, original_height):
+                preamble += f", proc={width}x{height}"
+            if preprocess_messages:
+                preamble += ", " + "; ".join(preprocess_messages)
             print(
-                f"Plan {relative}: {width}x{height} -> {output_width}x{output_height}, "
+                f"Plan {relative}: {preamble} -> out={output_width}x{output_height}, "
                 f"scale={scale:.4f}, tiles={len(tile_pairs)}, SeedVR2 tile resolution={group_resolution}"
             )
 
@@ -231,6 +288,9 @@ def _run(args: argparse.Namespace) -> int:
             print("Nothing to do.")
             return 0
 
+        # One upstream directory invocation per distinct tile inference resolution.
+        # With the common --scale workflow this is normally exactly one invocation,
+        # so Numz's --cache_dit/--cache_vae persist across every tile in the batch.
         for resolution, tile_pairs in sorted(groups.items()):
             input_dir = work_root / f"r{resolution}" / "input"
             output_dir = work_root / f"r{resolution}" / "output"
@@ -275,11 +335,21 @@ def _run(args: argparse.Namespace) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = _build_parser()
     argv = list(sys.argv[1:] if argv is None else argv)
 
+    # Convenience: allow `seedvr2-tile INPUT OUTPUT ...` in addition to `run`.
     if argv and argv[0] not in {"run", "setup", "-h", "--help", "--version"}:
         argv.insert(0, "run")
+
+    defaults: dict | None = None
+    config_path = _extract_config_path(argv)
+    if config_path is not None:
+        defaults = load_config(config_path)
+        if any(arg == flag or arg.startswith(flag + "=") for arg in argv for flag in ("--scale", "--long-edge", "--short-edge")):
+            for key in ("scale", "long_edge", "short_edge"):
+                defaults.pop(key, None)
+
+    parser = _build_parser(defaults=defaults)
     args = parser.parse_args(argv)
     if args.command == "setup":
         setup_upstream(args.root, args.ref, args.install_deps)
