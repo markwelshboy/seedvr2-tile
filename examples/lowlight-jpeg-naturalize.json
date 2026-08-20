@@ -30,6 +30,8 @@
   "io": {
     "format": "png",
     "recursive": false,
-    "overwrite": false
+    "overwrite": false,
+    "output_mode": "on",
+    "output_template": "#basename#_#model#_#scale#_#pre-megapixels#"
   }
 }
