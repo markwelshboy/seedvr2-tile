@@ -29,3 +29,11 @@ def test_directory_recursive_preserves_relative_structure(tmp_path):
     items = discover_inputs([str(tmp_path)], recursive=True, extensions=EXTS)
     rel = {str(x.relative) for x in items}
     assert rel == {"root.jpg", "nested/child.jpg"}
+
+
+def test_single_recursive_directory_keeps_top_level_relative_path(tmp_path):
+    nested = tmp_path / "only" / "nested"
+    nested.mkdir(parents=True)
+    (nested / "child.jpg").write_bytes(b"x")
+    items = discover_inputs([str(tmp_path)], recursive=True, extensions=EXTS)
+    assert [str(x.relative) for x in items] == ["only/nested/child.jpg"]
