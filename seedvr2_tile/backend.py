@@ -41,16 +41,9 @@ def resolve_model_name(value: str | None) -> str:
 
 
 def model_alias_lines() -> list[str]:
-    seen: set[str] = set()
-    lines: list[str] = []
-    for alias, filename in MODEL_ALIASES.items():
-        if alias.endswith("-fp8") and MODEL_ALIASES.get(alias.removesuffix("-fp8")) == filename:
-            continue
-        if filename in seen and alias not in {"3b", "7b", "7b-sharp"}:
-            continue
-        seen.add(filename)
-        lines.append(f"{alias:16} {filename}")
-    return lines
+    # Show explicit precision aliases even when they resolve to the same checkpoint
+    # as a convenience alias (e.g. 3b == 3b-fp8).
+    return [f"{alias:16} {filename}" for alias, filename in MODEL_ALIASES.items()]
 
 
 def resolve_seedvr2_root(explicit: str | None) -> Path:
