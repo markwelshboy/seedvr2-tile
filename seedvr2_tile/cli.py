@@ -11,11 +11,26 @@ from PIL import Image, ImageOps
 
 from . import __version__
 from .backend import (
-    BackendOptions, DEFAULT_CACHE_ROOT, DEFAULT_MODEL_ALIAS, ensure_models, model_alias_lines,
-    resolve_model_name, resolve_seedvr2_root, run_group, setup_upstream,
+    BackendOptions,
+    DEFAULT_CACHE_ROOT,
+    DEFAULT_MODEL_ALIAS,
+    MODEL_ALIASES,
+    ensure_models,
+    model_alias_lines,
+    resolve_model_name,
+    resolve_seedvr2_root,
+    run_group,
+    setup_upstream,
 )
 from .config import load_config
 from .fbcnn import DEFAULT_FBCNN_ROOT, FBCNNOptions, normalize_quality, release_fbcnn, setup_fbcnn
+from .inputs import discover_inputs
+from .naming import (
+    DEFAULT_OUTPUT_TEMPLATE,
+    option_values,
+    render_output_stem,
+    validate_output_template,
+)
 from .preprocess import PreprocessOptions, preprocess_image
 from .stitching import Stitcher
 from .tiling import TileSpec, make_tiles, save_tiles
@@ -28,6 +43,7 @@ class ImageJob:
     index: int
     source: Path
     relative: Path
+    output_path: Path
     width: int
     height: int
     scale: float
@@ -42,20 +58,6 @@ def _round_even(value: float) -> int:
     return max(16, int(round(value / 2.0) * 2))
 
 
-def _find_images(path: Path, recursive: bool) -> tuple[Path, list[Path]]:
-    if path.is_file():
-        if path.suffix.lower() not in IMAGE_EXTENSIONS:
-            raise ValueError(f"unsupported image extension: {path.suffix}")
-        return path.parent, [path]
-    if not path.is_dir():
-        raise FileNotFoundError(path)
-    pattern = "**/*" if recursive else "*"
-    images = sorted(p for p in path.glob(pattern) if p.is_file() and p.suffix.lower() in IMAGE_EXTENSIONS)
-    if not images:
-        raise ValueError(f"no supported images found in {path}")
-    return path, images
-
-
 def _compute_scale(width: int, height: int, args: argparse.Namespace) -> float:
     if args.long_edge:
         return args.long_edge / max(width, height)
@@ -64,9 +66,9 @@ def _compute_scale(width: int, height: int, args: argparse.Namespace) -> float:
     return args.scale
 
 
-def _output_path(root: Path, relative: Path, fmt: str) -> Path:
+def _output_path(root: Path, relative: Path, fmt: str, stem: str) -> Path:
     ext = {"png": ".png", "jpg": ".jpg", "webp": ".webp"}[fmt]
-    return root / relative.with_suffix(ext)
+    return root / relative.parent / f"{stem}{ext}"
 
 
 def _save_output(image: Image.Image, path: Path, fmt: str, quality: int) -> None:
@@ -88,6 +90,51 @@ def _extract_config_path(argv: list[str]) -> Path | None:
     return None
 
 
+def _config_input_specs(value: object) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, (list, tuple)):
+        return [str(x) for x in value]
+    return [str(value)]
+
+
+def _resolve_run_io(args: argparse.Namespace) -> tuple[list[str], Path]:
+    """Resolve backward-compatible positional input(s)/output plus config IO.
+
+    Without a configured/explicit output directory, the final positional path is
+    the output and all preceding paths are inputs. That makes an unquoted shell
+    glob work naturally: `seedvr2-tile images/*.jpg output/`.
+
+    If config supplies `io.output` (or --output-dir is used), every positional
+    path is treated as an input, which also makes glob expansion unambiguous.
+    """
+    positional = [str(x) for x in getattr(args, "paths", [])]
+    configured_inputs = _config_input_specs(getattr(args, "input", None))
+    configured_output = getattr(args, "output", None)
+
+    if args.output_dir is not None:
+        output = args.output_dir
+        inputs = positional or configured_inputs
+    elif configured_output is not None:
+        output = Path(configured_output)
+        inputs = positional or configured_inputs
+    elif len(positional) >= 2:
+        inputs = positional[:-1]
+        output = Path(positional[-1])
+    elif len(positional) == 1 and configured_inputs:
+        inputs = configured_inputs
+        output = Path(positional[0])
+    else:
+        raise ValueError(
+            "input(s) and output directory are required. Use INPUT... OUTPUT, "
+            "or set io.input/io.output in config, or pass --output-dir."
+        )
+
+    if not inputs:
+        raise ValueError("at least one input image, directory, or glob is required")
+    return inputs, Path(output).expanduser().resolve()
+
+
 def _build_parser(defaults: dict | None = None) -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="seedvr2-tile",
@@ -107,9 +154,19 @@ def _build_parser(defaults: dict | None = None) -> argparse.ArgumentParser:
     sub.add_parser("models", help="list friendly SeedVR2 model aliases")
 
     run = sub.add_parser("run", help="tile, upscale, and stitch images")
-    run.add_argument("input", type=Path, nargs="?", help="input image or directory (may also come from config)")
-    run.add_argument("output", type=Path, nargs="?", help="output directory (may also come from config)")
+    run.add_argument(
+        "paths",
+        nargs="*",
+        help=(
+            "input image(s), directory/directories or glob(s), followed by output directory. "
+            "With io.output/--output-dir set, every positional path is an input"
+        ),
+    )
+    run.add_argument("--output-dir", type=Path, help="explicit output directory; useful when inputs are shell-expanded or output also exists in config")
     run.add_argument("--config", type=Path, help="optional JSON config file; CLI flags override values from the file")
+    run.add_argument("--output-mode", choices=["on", "all", "delta"], default="on", help="filename mode: configured template, all processing options, or only non-default options")
+    run.add_argument("--output-template", default=DEFAULT_OUTPUT_TEMPLATE, help="filename stem template for --output-mode on; fields use #option-name# syntax")
+
     size = run.add_mutually_exclusive_group()
     size.add_argument("--scale", type=float, default=None, help="output scale factor applied after preprocessing (default: 2.0 when no size mode is set)")
     size.add_argument("--long-edge", type=int, help="target output longest edge after preprocessing")
@@ -143,7 +200,7 @@ def _build_parser(defaults: dict | None = None) -> argparse.ArgumentParser:
     backend.add_argument("--seedvr2-root")
     backend.add_argument("--seed", type=int, default=42)
     model_select = backend.add_mutually_exclusive_group()
-    model_select.add_argument("--model", dest="dit_model", default=DEFAULT_MODEL_ALIAS, help="friendly model alias (3b, 7b, 7b-sharp, etc.) or exact filename; default: 3b")
+    model_select.add_argument("--model", dest="dit_model", default=DEFAULT_MODEL_ALIAS, help="friendly model alias (3b/3b-fp8, 3b-fp16, 7b, 7b-sharp, etc.) or exact filename; default: 3b (FP8)")
     model_select.add_argument("--dit-model", dest="dit_model", help="exact SeedVR2 DiT filename (expert/backward-compatible form)")
     backend.add_argument("--model-dir")
     backend.add_argument("--model-download", action=argparse.BooleanOptionalAction, default=True, help="preflight/download selected DiT + VAE using Numz downloader (default: enabled)")
@@ -166,8 +223,8 @@ def _build_parser(defaults: dict | None = None) -> argparse.ArgumentParser:
 
 
 def _run(args: argparse.Namespace) -> int:
-    if args.input is None or args.output is None:
-        raise ValueError("input and output are required (positionally or via --config)")
+    input_specs, output_root = _resolve_run_io(args)
+
     if args.scale is None and args.long_edge is None and args.short_edge is None:
         args.scale = 2.0
     if args.scale is not None and args.scale <= 0:
@@ -176,16 +233,22 @@ def _run(args: argparse.Namespace) -> int:
         raise ValueError("--pre-megapixels must be > 0")
     if args.noise < 0 or args.noise > 1:
         raise ValueError("--noise must be in the range [0, 1]")
+
     args.fbcnn_quality = normalize_quality(args.fbcnn_quality)
-    args.dit_model = resolve_model_name(args.dit_model)
+    if args.output_mode == "on":
+        validate_output_template(args.output_template)
+
+    requested_model = args.dit_model or DEFAULT_MODEL_ALIAS
+    requested_key = requested_model.strip().lower()
+    model_label = requested_key if requested_key in MODEL_ALIASES else requested_model.strip()
+    args.dit_model = resolve_model_name(requested_model)
 
     tile_w = args.tile_width or args.tile
     tile_h = args.tile_height or args.tile
     if args.overlap >= min(tile_w, tile_h):
         raise ValueError("--overlap must be smaller than the tile dimensions")
 
-    source_root, sources = _find_images(args.input.expanduser().resolve(), args.recursive)
-    output_root = args.output.expanduser().resolve()
+    source_items = discover_inputs(input_specs, recursive=args.recursive, extensions=IMAGE_EXTENSIONS)
     seedvr2_root = resolve_seedvr2_root(args.seedvr2_root)
 
     options = BackendOptions(
@@ -225,6 +288,8 @@ def _run(args: argparse.Namespace) -> int:
         noise_seed=args.noise_seed,
     )
 
+    naming_values = option_values(args, model_label=model_label)
+
     if args.work_dir:
         work_root = args.work_dir.expanduser().resolve()
         work_root.mkdir(parents=True, exist_ok=True)
@@ -233,16 +298,33 @@ def _run(args: argparse.Namespace) -> int:
         work_root = Path(tempfile.mkdtemp(prefix="seedvr2-tile-"))
         temporary = True
 
-    print(f"Input images: {len(sources)}")
+    print(f"Input images: {len(source_items)}")
+    print(f"Output mode: {args.output_mode}")
+    if args.output_mode == "on":
+        print(f"Output template: {args.output_template}")
     print(f"Work directory: {work_root}")
 
     jobs: list[ImageJob] = []
     groups: dict[int, list[tuple[TileSpec, Image.Image]]] = {}
+    planned_outputs: set[Path] = set()
 
     try:
-        for image_index, src in enumerate(sources):
-            relative = src.relative_to(source_root)
-            out_path = _output_path(output_root, relative, args.format)
+        for image_index, item in enumerate(source_items):
+            src = item.path
+            relative = item.relative
+            output_stem = render_output_stem(
+                basename=relative.stem,
+                mode=args.output_mode,
+                template=args.output_template,
+                values=naming_values,
+            )
+            out_path = _output_path(output_root, relative, args.format, output_stem)
+            if out_path in planned_outputs:
+                raise ValueError(
+                    f"output naming collision: multiple inputs map to {out_path}. "
+                    "Include #basename# or another distinguishing field in --output-template."
+                )
+            planned_outputs.add(out_path)
             if out_path.exists() and not args.overwrite:
                 print(f"Skip existing: {out_path}")
                 continue
@@ -292,6 +374,7 @@ def _run(args: argparse.Namespace) -> int:
                     index=image_index,
                     source=src,
                     relative=relative,
+                    output_path=out_path,
                     width=width,
                     height=height,
                     scale=scale,
@@ -310,7 +393,8 @@ def _run(args: argparse.Namespace) -> int:
                 preamble += ", " + "; ".join(preprocess_messages)
             print(
                 f"Plan {relative}: {preamble} -> out={output_width}x{output_height}, "
-                f"scale={scale:.4f}, tiles={len(tile_pairs)}, SeedVR2 tile resolution={group_resolution}"
+                f"scale={scale:.4f}, tiles={len(tile_pairs)}, SeedVR2 tile resolution={group_resolution}, "
+                f"file={out_path.name}"
             )
 
         if not jobs:
@@ -355,12 +439,12 @@ def _run(args: argparse.Namespace) -> int:
             if job.alpha is not None and args.format != "jpg":
                 alpha = job.alpha.resize((job.output_width, job.output_height), Image.Resampling.LANCZOS)
                 output.putalpha(alpha)
-            out_path = _output_path(output_root, job.relative, args.format)
-            _save_output(output, out_path, args.format, args.quality)
-            print(f"Saved: {out_path}")
+            _save_output(output, job.output_path, args.format, args.quality)
+            print(f"Saved: {job.output_path}")
 
         return 0
     finally:
+        release_fbcnn()
         if temporary and not args.keep_work:
             shutil.rmtree(work_root, ignore_errors=True)
         elif args.keep_work:
@@ -370,7 +454,7 @@ def _run(args: argparse.Namespace) -> int:
 def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
 
-    # Convenience: allow `seedvr2-tile INPUT OUTPUT ...` in addition to `run`.
+    # Convenience: allow `seedvr2-tile INPUT... OUTPUT ...` in addition to `run`.
     if argv and argv[0] not in {"run", "setup", "models", "-h", "--help", "--version"}:
         argv.insert(0, "run")
 
@@ -385,7 +469,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = _build_parser(defaults=defaults)
     args = parser.parse_args(argv)
     if args.command == "models":
-        print("SeedVR2 model aliases (default: 3b):")
+        print("SeedVR2 model aliases (default: 3b -> FP8):")
         for line in model_alias_lines():
             print("  " + line)
         print("\nExact Numz registry/discovered filenames are also accepted with --model or --dit-model.")
