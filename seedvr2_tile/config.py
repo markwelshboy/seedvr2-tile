@@ -8,7 +8,8 @@ SECTION_MAP: dict[str, dict[str, str]] = {
     "io": {
         "input": "input", "output": "output", "format": "format", "quality": "quality",
         "recursive": "recursive", "overwrite": "overwrite", "keep_work": "keep_work",
-        "work_dir": "work_dir", "dry_run": "dry_run",
+        "work_dir": "work_dir", "dry_run": "dry_run", "output_mode": "output_mode",
+        "output_template": "output_template",
     },
     "preprocess": {
         "megapixels": "pre_megapixels", "resample": "pre_resample",
@@ -79,7 +80,15 @@ def load_config(path: Path) -> dict[str, Any]:
         else:
             raise ValueError(f"unknown config key '{key}'")
 
-    for path_key in ("input", "output", "work_dir", "fbcnn_root"):
+    # Input may intentionally be a glob string or a list of glob/path strings.
+    # Do not resolve it here because wildcard expansion happens at run time.
+    if "input" in flat and flat["input"] is not None:
+        if isinstance(flat["input"], list):
+            flat["input"] = [str(x) for x in flat["input"]]
+        elif not isinstance(flat["input"], str):
+            flat["input"] = str(flat["input"])
+
+    for path_key in ("output", "work_dir", "fbcnn_root"):
         if path_key in flat and flat[path_key] is not None:
             flat[path_key] = Path(flat[path_key])
     return flat
