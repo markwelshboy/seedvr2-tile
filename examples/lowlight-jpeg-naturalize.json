@@ -1,0 +1,37 @@
+{
+  "preprocess": {
+    "fbcnn": {
+      "enabled": true,
+      "quality": "auto",
+      "device": "auto"
+    },
+    "megapixels": 1.0,
+    "resample": "lanczos",
+    "noise": 0.0,
+    "noise_seed": 42
+  },
+  "upscale": {
+    "scale": 2.0
+  },
+  "tiling": {
+    "tile": 1024,
+    "overlap": 64,
+    "tile_upscale_resolution": 2048,
+    "strategy": "chess",
+    "blend": "multiband"
+  },
+  "backend": {
+    "model": "3b",
+    "model_download": true,
+    "attention_mode": "sdpa",
+    "color_correction": "lab",
+    "vae_tiled": false
+  },
+  "io": {
+    "format": "png",
+    "recursive": false,
+    "overwrite": false,
+    "output_mode": "on",
+    "output_template": "#basename#_#model#_#scale#_#pre-megapixels#"
+  }
+}

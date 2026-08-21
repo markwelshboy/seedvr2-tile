@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "seedvr2-tile"
+version = "0.5.0"
+description = "Standalone spatially tiled batch upscaling frontend for SeedVR2"
+readme = "README.md"
+requires-python = ">=3.10"
+license = {text = "MIT"}
+authors = [{name = "Mark Richards"}]
+dependencies = [
+  "numpy>=1.24",
+  "Pillow>=10.0",
+  "opencv-python>=4.8",
+]
+
+[project.scripts]
+seedvr2-tile = "seedvr2_tile.cli:main"
+
+[project.urls]
+Repository = "https://github.com/markwelshboy/seedvr2-tile"
+SeedVR2 = "https://github.com/numz/ComfyUI-SeedVR2_VideoUpscaler"
+
+[tool.setuptools.packages.find]
+include = ["seedvr2_tile*"]
