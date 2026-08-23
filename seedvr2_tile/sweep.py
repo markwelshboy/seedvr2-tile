@@ -21,8 +21,8 @@ from .inputs import discover_inputs
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tif", ".tiff"}
 BUCKETS = ("small", "medium", "large")
 DEFAULT_PRESETS = {
-    "small": ("native", 0.50, 0.75),
-    "medium": ("native", 0.75, 1.00),
+    "small": (None, 0.50, 0.75),
+    "medium": (None, 0.75, 1.00),
     "large": (1.00, 1.50, 2.00),
 }
 DEFAULT_SCALES = (1.5, 2.0, 3.0)
