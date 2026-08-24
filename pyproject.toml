@@ -20,7 +20,7 @@ dependencies = [
 seedvr2-tile = "seedvr2_tile.cli_noise:main"
 seedvr2-sweep = "seedvr2_tile.noise_sweep:probe_main"
 seedvr2-sweep-report = "seedvr2_tile.noise_sweep:report_main"
-seedvr2-sweep-full = "seedvr2_tile.noise_sweep:full_main"
+seedvr2-sweep-full = "seedvr2_tile.full_sweep_report:main"
 
 [project.urls]
 Repository = "https://github.com/markwelshboy/seedvr2-tile"
