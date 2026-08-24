@@ -81,6 +81,7 @@ seedvr2_sweep/
 └── reports/
     └── <bucket>/<source-id>/<probe-id>/noise-0/
         ├── comparison.png
+        ├── overview.png
         ├── inputs/
         │   ├── pre-native.png
         │   ├── pre-0p75mp.png
@@ -90,9 +91,29 @@ seedvr2_sweep/
             └── ...
 ```
 
-Each comparison sheet has preprocessing targets as rows. The first column is the **actual post-preprocess input core** selected for that probe and row; subsequent columns are the requested SeedVR2 scales. Labels include the full preprocessed dimensions, actual tile index / tile count, SeedVR2 backend resolution, and predicted full-image output megapixels.
+Each `comparison.png` is detail-first: cells show a square crop centered on the same normalized probe location in every preprocessing/scale result instead of shrinking the entire probe core into the cell. The default detail crop covers 50% of the core and the default cell is 420 px. `overview.png` retains the entire probe core for context.
+
+The first column is the **actual post-preprocess input core** selected for that probe and row; subsequent columns are the requested SeedVR2 scales. Labels include the full preprocessed dimensions, actual tile index / tile count, SeedVR2 backend resolution, and predicted full-image output megapixels.
 
 `manifest.json` records the normalized probe locations and the number of requested result cells versus unique SeedVR2 tile inferences. `results.csv` records the tile mapping and output path for every rendered result cell.
+
+## Rebuild reports without inference
+
+Once a probe sweep has completed, the saved input/result cores contain everything needed to redraw the visual report. `seedvr2-sweep-report` reads the existing `manifest.json` and `results.csv` and regenerates `comparison.png`, `overview.png`, and `index.html` **without invoking SeedVR2 or loading a GPU model**:
+
+```bash
+seedvr2-sweep-report ./seedvr2_sweep/
+```
+
+Try a tighter detail view without rerunning inference:
+
+```bash
+seedvr2-sweep-report ./seedvr2_sweep/ \
+  --comparison-crop-fraction 0.35 \
+  --cell-size 480
+```
+
+Smaller `--comparison-crop-fraction` values zoom further in. The crop remains centered on the original normalized probe coordinate even when different preprocessing choices map that point onto different tile grids.
 
 ## Narrow noise refinement
 
@@ -123,7 +144,8 @@ This keeps the expensive noise axis out of the initial search while still making
 --noise-values LIST
 --max-output-mp MP                # 0 disables the cap
 --probe-tiles N                   # default 3
---cell-size PX
+--comparison-crop-fraction F      # default 0.50; smaller = tighter report zoom
+--cell-size PX                    # default 420 for probe reports
 --fbcnn / --no-fbcnn
 --jpeg-quality auto|QF
 --seed N
