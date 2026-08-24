@@ -45,6 +45,24 @@ def _detail_fit_cell(
     return crop.resize((size, size), Image.Resampling.LANCZOS)
 
 
+def _save_detail_crop(
+    source_path: Path,
+    target: Path,
+    *,
+    size: int,
+    focus: tuple[float, float],
+) -> None:
+    """Save the exact normalized detail crop used by the comparison sheet."""
+    target.parent.mkdir(parents=True, exist_ok=True)
+    with Image.open(source_path) as opened:
+        rendered = _detail_fit_cell(opened, size, focus)
+    rendered.save(target, format="PNG", compress_level=4)
+
+
+def _pre_crop_token(pre_mp: float | None) -> str:
+    return "native" if pre_mp is None else f"{_fmt_float(pre_mp)}mp"
+
+
 @lru_cache(maxsize=64)
 def _core_boxes(
     width: int,
@@ -113,7 +131,7 @@ def _detail_sheet_cell(
 
 
 def _make_probe_sheet_detail_first(*args, target: Path, **kwargs) -> None:
-    """Write a probe-aligned detail sheet plus the original whole-core overview."""
+    """Write aligned detail crops, a comparison sheet and a whole-core overview."""
     source: SourceImage = kwargs["source"]
     probe: _base.Probe = kwargs["probe"]
     noise: float = kwargs["noise"]
@@ -121,9 +139,16 @@ def _make_probe_sheet_detail_first(*args, target: Path, **kwargs) -> None:
     scales = kwargs["scales"]
     output_root: Path = kwargs["output_root"]
     result_index = kwargs["result_index"]
+    cell_size = int(kwargs["cell_size"])
+
+    crop_dir = target.parent / "crops"
+    crop_dir.mkdir(parents=True, exist_ok=True)
+    for stale in crop_dir.glob("*.png"):
+        stale.unlink()
 
     focus_by_path: dict[str, tuple[float, float]] = {}
-    for pre_mp in pre_values:
+    for row_index, pre_mp in enumerate(pre_values, start=1):
+        pre_token = _pre_crop_token(pre_mp)
         any_result = next(
             (
                 result_index[(source.source_id, probe.probe_id, pre_mp, scale, noise)]
@@ -136,11 +161,27 @@ def _make_probe_sheet_detail_first(*args, target: Path, **kwargs) -> None:
             focus = _focus_for_result(probe, any_result)
             input_path = _base._input_core_path(output_root, source, probe, pre_mp, noise)
             focus_by_path[str(input_path)] = focus
+            _save_detail_crop(
+                input_path,
+                crop_dir / f"{row_index:02d}_pre-{pre_token}__00-input.png",
+                size=cell_size,
+                focus=focus,
+            )
 
-        for scale in scales:
+        for col_index, scale in enumerate(scales, start=1):
             result = result_index.get((source.source_id, probe.probe_id, pre_mp, scale, noise))
             if result is not None:
-                focus_by_path[str(result.output_core_path)] = _focus_for_result(probe, result)
+                focus = _focus_for_result(probe, result)
+                focus_by_path[str(result.output_core_path)] = focus
+                _save_detail_crop(
+                    result.output_core_path,
+                    crop_dir / (
+                        f"{row_index:02d}_pre-{pre_token}__{col_index:02d}-"
+                        f"scale-{_fmt_float(scale)}x.png"
+                    ),
+                    size=cell_size,
+                    focus=focus,
+                )
 
     global _DETAIL_FOCUS_BY_PATH
     _DETAIL_FOCUS_BY_PATH = focus_by_path
@@ -181,6 +222,7 @@ def _write_html(
     if not plan_only:
         parts.append(
             f"<p><strong>Detail view:</strong> comparison cells show a {crop_percent}% square crop centered on the same normalized probe location in every preprocessing/scale result. "
+            "The same normalized crops are also saved as individual PNGs under each case's <code>crops/</code> directory for flip/overlay comparison. "
             "The whole-core overview is retained below each comparison. Sheets are shown at native size and scroll horizontally rather than being shrunk to the browser width.</p>"
         )
 
@@ -202,9 +244,14 @@ def _write_html(
                 base = Path("reports") / source.bucket / source.source_id / probe.probe_id / f"noise-{_fmt_float(noise)}"
                 detail_rel = base / "comparison.png"
                 overview_rel = base / "overview.png"
+                crops_rel = base / "crops"
                 detail_url = html.escape(detail_rel.as_posix())
                 overview_url = html.escape(overview_rel.as_posix())
+                crops_text = html.escape(crops_rel.as_posix())
                 parts.append(f"<h4>noise={noise:g} · detail crop</h4>")
+                parts.append(
+                    f"<p class='meta'>Individual overlay-ready crops: <code>{crops_text}/</code></p>"
+                )
                 parts.append(
                     f"<div class='sheet-scroll'><a href='{detail_url}'><img class='sheet' src='{detail_url}' alt='detail comparison'></a></div>"
                 )
