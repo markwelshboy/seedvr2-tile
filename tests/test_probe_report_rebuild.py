@@ -107,6 +107,18 @@ def test_report_only_rebuild_uses_existing_probe_cores(tmp_path: Path):
     assert main([str(root), "--comparison-crop-fraction", "0.4", "--cell-size", "160"]) == 0
     assert (case / "comparison.png").is_file()
     assert (case / "overview.png").is_file()
+
+    crop_dir = case / "crops"
+    input_crop = crop_dir / "01_pre-native__00-input.png"
+    output_crop = crop_dir / "01_pre-native__01-scale-2x.png"
+    assert input_crop.is_file()
+    assert output_crop.is_file()
+    with Image.open(input_crop) as opened:
+        assert opened.size == (160, 160)
+    with Image.open(output_crop) as opened:
+        assert opened.size == (160, 160)
+
     html = (root / "index.html").read_text(encoding="utf-8")
     assert "40% square crop" in html
     assert "Whole probe-core overview" in html
+    assert "Individual overlay-ready crops" in html
