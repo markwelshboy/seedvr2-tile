@@ -18,7 +18,8 @@ dependencies = [
 
 [project.scripts]
 seedvr2-tile = "seedvr2_tile.cli:main"
-seedvr2-sweep = "seedvr2_tile.probe_sweep:main"
+seedvr2-sweep = "seedvr2_tile.probe_sweep_report:main"
+seedvr2-sweep-report = "seedvr2_tile.probe_report_rebuild:main"
 seedvr2-sweep-full = "seedvr2_tile.sweep:main"
 
 [project.urls]
