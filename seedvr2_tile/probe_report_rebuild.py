@@ -6,7 +6,7 @@ import json
 from pathlib import Path
 
 from . import probe_sweep as _base
-from . import probe_sweep_report as _report
+from . import probe_scene_report as _report
 from .sweep import SourceImage
 
 
@@ -76,7 +76,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "--comparison-crop-fraction",
         type=float,
         default=0.50,
-        help="fraction of the probe core shown in detail cells; smaller values zoom further (default: 0.50)",
+        help="fraction of the reference probe core used to request the shared scene crop; smaller values zoom further (default: 0.50)",
     )
     parser.add_argument("--cell-size", type=int, default=420, help="comparison cell size in pixels (default: 420)")
     return parser
@@ -182,7 +182,7 @@ def main(argv: list[str] | None = None) -> int:
         plan_only=False,
     )
     print(
-        f"Rebuilt {sheets} probe comparison sheet(s) from existing cores; "
+        f"Rebuilt {sheets} scene-registered probe comparison sheet(s) from existing cores; "
         f"no SeedVR2 inference performed."
     )
     print(f"Report: {root / 'index.html'}")

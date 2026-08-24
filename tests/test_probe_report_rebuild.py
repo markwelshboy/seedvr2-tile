@@ -118,7 +118,14 @@ def test_report_only_rebuild_uses_existing_probe_cores(tmp_path: Path):
     with Image.open(output_crop) as opened:
         assert opened.size == (160, 160)
 
+    scene = json.loads((case / "scene-window.json").read_text(encoding="utf-8"))
+    assert scene["coordinate_space"] == "normalized-full-preprocessed-image"
+    assert scene["requested_reference_core_fraction"] == 0.4
+    assert scene["effective_reference_core_fraction"] <= 0.4
+    assert scene["window"]["x0"] < 0.5 < scene["window"]["x1"]
+    assert scene["window"]["y0"] < 0.5 < scene["window"]["y1"]
+
     html = (root / "index.html").read_text(encoding="utf-8")
-    assert "40% square crop" in html
+    assert "Scene-registered detail view" in html
     assert "Whole probe-core overview" in html
-    assert "Individual overlay-ready crops" in html
+    assert "Overlay crops" in html
