@@ -44,6 +44,14 @@ seedvr2-sweep-full INPUT OUTPUT \
 
 Multiple latent values are supported by `seedvr2-sweep-full` too; each value is written to a separate `latent-noise-*` subdirectory.
 
+For a multi-latent full-image sweep, the top-level report groups the same source image and exact restoration recipe side-by-side across latent values. Full-resolution copies for overlay/flip tools are written under `overlay-images/`, with one leaf directory per source/recipe. Browser previews use smaller JPEG thumbnails so the comparison page remains responsive even when the restored outputs are large.
+
+An already-completed full-image latent sweep can rebuild these comparisons without inference:
+
+```bash
+seedvr2-sweep-full-report OUTPUT
+```
+
 ## Direct tile CLI
 
 The direct CLI also exposes explicit names:
