@@ -185,7 +185,10 @@ class SpandrelUpscaler:
     def _run_tensor(self, tensor):
         with self.torch.inference_mode():
             output = self.model(tensor)
-        return output.clamp_(0, 1)
+        # Spandrel already clamps image-model outputs to [0, 1] inside
+        # inference_mode. Clone here to leave inference tensors at the backend
+        # boundary before our tiling/stitch/output code performs normal tensor ops.
+        return output.clone()
 
     def _run_tiled(self, tensor):
         torch = self.torch
