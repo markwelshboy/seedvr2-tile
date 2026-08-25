@@ -23,6 +23,7 @@ seedvr2-sweep-report = "seedvr2_tile.interactive_probe_report:report_main"
 seedvr2-sweep-full = "seedvr2_tile.tile_cap_sweep:main"
 seedvr2-sweep-full-report = "seedvr2_tile.tile_cap_sweep:report_main"
 seedvr2-sweep-serve = "seedvr2_tile.report_server:main"
+upscale = "seedvr2_tile.upscale_sweep:main"
 
 [project.urls]
 Repository = "https://github.com/markwelshboy/seedvr2-tile"
