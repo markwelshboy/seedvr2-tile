@@ -28,11 +28,12 @@ MODEL_SPECS: dict[str, ModelSpec] = {
         expected_scale=2,
         expected_architecture="ESRGAN",
     ),
-    # SPAN itself is supported natively by Spandrel. The official authors publish
-    # checkpoints as a Google Drive archive rather than a stable direct .pth URL,
-    # so this alias deliberately requires --model-file or --model-url.
+    # A real-world-oriented 2x SPAN checkpoint: fast universal SR with JPEG
+    # degradation, multiscale resize degradation, and DoF preservation.
     "span-x2": ModelSpec(
         name="span-x2",
+        url="https://github.com/Phhofm/models/releases/download/2xNomosUni_span_multijpg_ldl/2xNomosUni_span_multijpg_ldl.pth",
+        filename="2xNomosUni_span_multijpg_ldl.pth",
         expected_scale=2,
         expected_architecture="SPAN",
     ),
